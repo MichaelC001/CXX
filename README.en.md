@@ -199,7 +199,7 @@ End-to-end smoke test (spins up relay + daemon + a simulated client and asserts 
 npm run smoke
 ```
 
-Because `app-server` is experimental upstream, CXX guards against protocol drift: `npm run check:schema` exports the official app-server JSON Schema and compares it to a committed fingerprint (`daemon/schema/manifest.json`), failing on any change. After reviewing an intended change, refresh the baseline with `npm run check:schema:update`. CI runs the schema check and the smoke test against the pinned minimum codex on every push, and against `codex@latest` daily to catch breaking releases early.
+Because `app-server` is experimental upstream, CXX guards against protocol drift: `npm run check:schema` exports the official app-server JSON Schema and compares it to a committed fingerprint (`daemon/schema/manifest.json`), failing on any change. After reviewing an intended change, refresh the baseline with `npm run check:schema:update`. CI runs the smoke test against the pinned minimum codex on every push. A daily `codex@latest` job records schema drift as a warning and uses the end-to-end smoke test as the compatibility gate, so harmless upstream schema additions do not generate repeated failure emails.
 
 ## 🧭 How it works
 

@@ -207,8 +207,9 @@ npm run smoke
 
 由于 `app-server` 上游仍是实验特性，C叉叉 内置协议漂移守护：`npm run check:schema` 导出官方 app-server
 的 JSON Schema 并与已提交的指纹（`daemon/schema/manifest.json`）比对，一有变化即失败。确认是预期变更后，
-用 `npm run check:schema:update` 刷新基线。CI 在每次 push 用钉定的最低 codex 版本跑 schema 校验与冒烟，
-并每天用 `codex@latest` 跑一次，尽早发现破坏性发布。
+用 `npm run check:schema:update` 刷新基线。CI 在每次 push 用钉定的最低 codex 版本跑冒烟测试；每天运行的
+`codex@latest` 任务会把 schema 漂移记为警告，并以端到端冒烟作为兼容性门槛，避免无害的上游 schema
+新增反复触发失败邮件。
 
 ## 🧭 工作原理
 

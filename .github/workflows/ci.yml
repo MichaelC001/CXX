@@ -3,9 +3,11 @@
 # Two jobs:
 #   compat-pinned : runs on every push / PR against the minimum-verified codex. Gates merges.
 #   compat-latest : scheduled daily + manual, installs codex@latest to catch a breaking upstream
-#                   release early. A red run here is the alarm to review protocol drift.
+#                   release early. Schema drift is reported without failing the job; the smoke
+#                   test is the alarm for an actual compatibility break.
 #
-# Each job runs, in order: syntax check → schema-drift (offline, deterministic) → E2E smoke.
+# The committed schema baseline tracks the last reviewed codex release. It is intentionally not
+# compared with the older minimum-supported release because their schemas are expected to differ.
 #
 # Auth note: `generate-json-schema` and the smoke handshake/list/reject path are credential-free.
 # The message→approval turn (a real model call) needs a logged-in codex; to exercise it in CI,
@@ -26,6 +28,9 @@ permissions:
 jobs:
   compat-pinned:
     name: compat (codex ${{ matrix.codex }})
+    # A scheduled run is for codex@latest only. The minimum-supported release is covered by
+    # pushes, pull requests, and manual dispatches.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -58,8 +63,6 @@ jobs:
             test/codex-path.test.mjs \
             test/qr-bmp.test.mjs \
             test/file-search.test.mjs
-      - name: Schema drift (offline, deterministic)
-        run: npm run check:schema
       - name: End-to-end smoke (relay + daemon + real codex app-server)
         run: npm run smoke
 
@@ -77,7 +80,16 @@ jobs:
       - name: Install latest official codex
         run: npm install -g @openai/codex@latest
       - run: codex --version
-      - name: Schema drift vs committed baseline
-        run: npm run check:schema
+      - name: Observe schema drift vs committed baseline
+        shell: bash
+        run: |
+          if npm run check:schema; then
+            echo "### Codex protocol schema" >> "$GITHUB_STEP_SUMMARY"
+            echo "No drift from the committed baseline." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=Codex protocol schema drift::The latest Codex schema differs from the reviewed baseline. The end-to-end smoke test will determine whether CXX is still compatible."
+            echo "### Codex protocol schema drift" >> "$GITHUB_STEP_SUMMARY"
+            echo "The latest Codex schema differs from the reviewed baseline. This is recorded as a warning; the end-to-end smoke test remains the compatibility gate." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: End-to-end smoke
         run: npm run smoke
