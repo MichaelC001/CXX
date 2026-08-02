@@ -30,7 +30,7 @@ import {
 import { enforceDevices, watchConfig } from "./config-watch.mjs";
 import { privateKeyFromPem } from "./crypto.mjs";
 import { acquireDaemonLock, releaseDaemonLock } from "./daemon-lock.mjs";
-import { Notifier, normalizeNotifier, redact } from "./notify.mjs";
+import { isHttpUrl, Notifier, normalizeNotifier, parseOneBotTarget, redact } from "./notify.mjs";
 import { MENU_COMMANDS, runMenuCommand } from "./menu-backend.mjs";
 import { makeDeps as makeMacAgentDeps } from "./mac-agent.mjs";
 import { makeDeps as makeWinAgentDeps } from "./win-agent.mjs";
@@ -605,6 +605,8 @@ const HELP = `CXX（C叉叉）— 用手机远程控制本机的 ChatGPT / Claud
   notify --add wecom --url <url>    企业微信群机器人
   notify --add dingtalk --url <url> 钉钉群机器人
   notify --add custom --url <url>   自定义 webhook
+  notify --add onebot11 --url <url>/send_msg --target private:<QQ号> [--token <令牌>]
+                                      OneBot 11（NapCat）纯文本
   notify --remove <序号>            删除第 N 个渠道
   notify --clear                    清空所有渠道
   notify --test                     向所有渠道发测试通知
@@ -629,6 +631,10 @@ const NOTIFY_USAGE = `通知渠道管理：
   notify --add wecom --url <url>      添加企业微信群机器人
   notify --add dingtalk --url <url>   添加钉钉群机器人
   notify --add custom --url <url>     添加自定义 webhook
+  notify --add onebot11 --url <url>   添加 OneBot 11（另需 --target）
+      --target private:<QQ号>         发给 QQ 用户
+      --target group:<群号>           发到 QQ 群
+      --token <令牌>                  可选的 HTTP Bearer 令牌
   notify --remove <index>             删除第 N 个渠道
   notify --clear                      清空所有渠道
   notify --test                       向所有渠道发测试通知`;
@@ -665,7 +671,24 @@ async function notifyCommand(configPath, values) {
     const needKey = ["bark", "serverchan"];
     const needUrl = ["wecom", "dingtalk", "custom"];
     let entry;
-    if (needKey.includes(type)) {
+    if (type === "onebot11") {
+      if (!values.url) { console.error("onebot11 需要 --url"); process.exit(1); }
+      if (!isHttpUrl(values.url)) {
+        console.error("onebot11 的 --url 必须是 http:// 或 https:// 地址");
+        process.exit(1);
+      }
+      const target = parseOneBotTarget(values.target);
+      if (!target) {
+        console.error("onebot11 需要 --target private:<QQ号> 或 group:<群号>");
+        process.exit(1);
+      }
+      if (values.token !== undefined && !values.token.trim()) {
+        console.error("onebot11 的 --token 不能为空");
+        process.exit(1);
+      }
+      entry = { type, url: values.url, ...target };
+      if (values.token !== undefined) entry.token = values.token.trim();
+    } else if (needKey.includes(type)) {
       if (!values.key) { console.error(`${type} 需要 --key`); process.exit(1); }
       entry = { type, key: values.key };
       if (type === "bark" && values.server) entry.server = values.server;
@@ -685,7 +708,11 @@ async function notifyCommand(configPath, values) {
     const notifier = new Notifier(config.notifiers, { log: (m) => console.log(m) });
     if (notifier.count === 0) { console.error("尚未配置通知渠道。"); process.exit(1); }
     console.log(`向 ${notifier.count} 个渠道发送测试通知…`);
-    await notifier.send("ChatGPT 远程测试", "如果你收到这条，说明通知渠道配置成功 ✅");
+    const sent = await notifier.send("ChatGPT 远程测试", "如果你收到这条，说明通知渠道配置成功 ✅");
+    if (!sent) {
+      console.error("测试通知发送失败，请检查渠道配置和日志。");
+      process.exit(1);
+    }
     console.log("已发送（请检查手机是否收到）。");
   }
 }
@@ -759,6 +786,8 @@ export async function main() {
       key: { type: "string" },
       url: { type: "string" },
       server: { type: "string" },
+      target: { type: "string" },
+      token: { type: "string" },
       remove: { type: "string" },
       clear: { type: "boolean" },
       test: { type: "boolean" },

@@ -5,6 +5,11 @@
 
 发布 `vX.Y.Z` tag 时，CI 会自动把对应版本段落作为 GitHub Release 的说明。早于 0.1.9 的版本变更未整理到本文件，可查看 [GitHub Releases](https://github.com/focuxdot/CXX/releases) 与提交历史。
 
+## [0.1.12] - 2026-08-02
+
+### 新增
+- **OneBot 11（NapCat）QQ 通知渠道**。支持通过 NapCat HTTP 服务器向 QQ 私聊或群聊发送 CXX 任务通知，可选 Bearer 令牌，并校验 HTTP 与 OneBot 业务响应。CLI 增加目标与地址校验，同步补充中英文说明及回归测试。
+
 ## [0.1.11] - 2026-07-17
 
 ### 修复
