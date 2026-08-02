@@ -2355,6 +2355,7 @@ const WATCH_RENEW_SAFETY_MS = 15000;
 const WATCH_RENEW_RETRY_MS = 5000;
 const BACKGROUND_UNWATCH_GRACE_MS = 15000;
 const HB_VERIFY_MS = 5000;
+const REQUEST_TIMEOUT_MS = 30000;
 
 // 从 UA 解读一个便于识别的设备短标签（如「华为 · 微信 8.0.40」），鉴权时发给电脑端，
 // 让「已配对设备」页显示可读名字而非随机 ID。纯启发式、失败即返回空串（不阻断鉴权）。
@@ -2789,7 +2790,7 @@ class Session {
     this.ws.send(JSON.stringify({ t: "msg", data: envelope }));
   }
 
-  async request(method, params = {}, timeoutMs = 15000) {
+  async request(method, params = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
     if (method === "session.watch" && this.serverCaps?.wl === 1) {
       params = { ...params, leaseMs: WATCH_LEASE_MS };
     }
@@ -2880,11 +2881,11 @@ class Session {
   }
 
   // 恒经中继通道的请求（request 的直连路由旁路）：信令、回落场景的中继侧收尾用
-  relayRequest(method, params = {}, timeoutMs = 15000) {
+  relayRequest(method, params = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
     params = injectAgent(method, params);
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      // 超时定时器随请求了结即清：不清的话每个请求都挂一个 15s 定时器到期才释放
+      // 超时定时器随请求了结即清：不清的话每个请求都要挂到默认超时才释放
       const timer = setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
@@ -3151,7 +3152,7 @@ class RtcChannel {
     this.dc.send(JSON.stringify(envelope)); // 裸信封，无中继的 {t:"msg"} 包装
   }
 
-  request(method, params = {}, timeoutMs = 15000) {
+  request(method, params = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
     params = injectAgent(method, params);
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
@@ -4040,11 +4041,9 @@ const app = {
   deepLinkAgent: null,     // 深链带的 agent（#s=..&a=claude）：开会话前先切到该后端
   refreshTimer: null,
   listGen: 0,              // 列表数据空间代次（resetListModel 递增）：切电脑/切 agent 后，
-                           // 在途的 loadHome/预取按代次作废，旧空间的数据不污染新模型与快照
+                           // 在途的 loadHome/懒加载按代次作废，旧空间的数据不污染新模型与快照
   watchToken: null,        // 当前 watch 的令牌（每次 watch 换新，daemon 原样打在快照/事件帧上）：
                            // 快速重开同一会话时凭它丢弃被顶替的旧 watch 在途帧
-  prefetching: false,      // 后台全量预取进行中（把所有项目会话拉进缓存，令展开秒开）
-  prefetchAt: 0,           // 上次预取完成时刻（节流：短时间内不重复全量预取）
   isViewer: false,         // 观众态（围观链接进入）：只读，无列表/操作/审批
   viewerEnded: false,      // 围观终态（被踢/过期）：停止重连，显示"围观已结束"
   replayMode: false,       // 回放模式（已结束会话从头读）：翻页方向由"加载更早"倒转为"继续加载"
@@ -4903,7 +4902,7 @@ function renderProjects(list, attnIds, q) {
       const cache = app.projSessions.get(norm);
       const rows = (cache?.sessions || []).filter((s) => !attnIds.has(s.id) && sessionMatches(s, q));
       for (const s of rows) list.appendChild(sessionRow(s, true));
-      if ((cache?.loading || app.prefetching) && !rows.length) list.appendChild(loadingRow());
+      if (cache?.loading && !rows.length) list.appendChild(loadingRow());
       else if (cache?.nextCursor) list.appendChild(loadMoreRow(() => ensureProjectLoaded(norm, p.cwd, { more: true })));
     }
   }
@@ -5016,10 +5015,9 @@ function toggleProject(norm, cwd) {
   renderList();
 }
 
-// 懒加载某项目的会话（sessions.list 带 cwd 过滤，只拉该项目、恒定有界）。
+// 懒加载某项目的会话（sessions.list 带 cwd 过滤，每次只拉一小页）。
 // more=继续下一页；refresh=从头重拉（刷新时保持已展开项目内容）。
 async function ensureProjectLoaded(norm, cwd, { more = false, refresh = false } = {}) {
-  if (app.prefetching && !more && !refresh) return; // 后台全量预取中：预取会填充，别重复按需拉
   let c = app.projSessions.get(norm);
   if (!c) { c = { sessions: [], nextCursor: null, done: false, loading: false }; app.projSessions.set(norm, c); }
   if (c.loading) return;
@@ -5030,7 +5028,10 @@ async function ensureProjectLoaded(norm, cwd, { more = false, refresh = false } 
   if (app.view === "list") renderList();
   const gen = app.listGen;
   try {
-    const res = await app.session.request("sessions.list", { cwd, cursor: c.nextCursor ?? null, limit: 2000 });
+    // Codex 的 thread/list 单页上限是 100。大项目若一次凑 1000/2000 条，需要 daemon
+    // 串行翻十几页，容易撞上手机端请求超时；到货后一次渲染近千行还会让移动端卡死。
+    // 一次只取引擎原生的一页，后续由「加载更多」显式续取。
+    const res = await app.session.request("sessions.list", { cwd, cursor: c.nextCursor ?? null, limit: 100 });
     if (gen !== app.listGen) return; // 数据空间已切换（换电脑/换 agent）：旧 agent 的会话不入新模型
     const batch = res?.sessions ?? [];
     const seen = new Set(c.sessions.map((s) => s.id));
@@ -5044,55 +5045,6 @@ async function ensureProjectLoaded(norm, cwd, { more = false, refresh = false } 
   } finally {
     c.loading = false;
     if (app.view === "list") renderList();
-  }
-}
-
-// 首页渲染后台全量预取：把所有会话按批（1000/批，稳过 15s 超时）拉下来、按项目分组，
-// 全部成功后一次性提交进 per-project 缓存并标记 done——这样展开项目即「已在内存」秒开，
-// 而不是点开才拉。与首页初次渲染解耦、不阻塞；失败/超时不提交，展开时按需拉兜底。
-// 分批用 1000（非 2000）：单请求更稳地压在 15s 请求超时内，后台多翻几次无所谓。
-async function prefetchAllProjects() {
-  if (app.prefetching) return;
-  if (app.prefetchAt && Date.now() - app.prefetchAt < 20000) return; // 20s 内不重复全量预取
-  app.prefetching = true;
-  const gen = app.listGen; // 数据空间代次：切电脑/切 agent 后本次预取作废，不混装两个空间的会话
-  if (app.view === "list") renderList(); // 展开中的空项目立即显示「加载中」
-  try {
-    const grouped = new Map(); // norm -> {sessions, seen}
-    let cursor = null;
-    for (let guard = 0; guard < 120; guard++) { // 兜底上限 120*1000，防跑飞
-      let res;
-      try {
-        res = await app.session.request("sessions.list", cursor ? { cursor, limit: 1000 } : { limit: 1000 });
-      } catch { return; } // 超时/断网：不提交，展开时按需拉兜底（finally 会复位标志）
-      if (gen !== app.listGen) return; // 已切换：前几页属旧空间，整批放弃（finally 会补跑新空间的预取）
-      const batch = res?.sessions ?? [];
-      ingestSessions(batch);
-      for (const s of batch) {
-        if (!s?.id) continue;
-        const norm = normSep(s.cwd);
-        let g = grouped.get(norm);
-        if (!g) { g = { sessions: [], seen: new Set() }; grouped.set(norm, g); }
-        if (!g.seen.has(s.id)) { g.seen.add(s.id); g.sessions.push(s); }
-      }
-      cursor = res?.nextCursor ?? null;
-      if (!cursor) break;
-    }
-    // 全量成功：提交进缓存并标记 done（展开秒开、不再触发网络）。覆盖既有按需缓存无妨——同样完整。
-    for (const [norm, g] of grouped) {
-      g.sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-      app.projSessions.set(norm, { sessions: g.sessions, nextCursor: null, done: true, loading: false });
-    }
-    if (app.view === "list") renderList();
-  } finally {
-    app.prefetching = false;
-    if (gen === app.listGen) {
-      app.prefetchAt = Date.now();
-    } else {
-      // 本次占位期间新空间的预取请求被 prefetching 闸掉了：立即替它补跑
-      // （prefetchAt 已被 resetListModel 归零，不会撞 20s 节流）
-      prefetchAllProjects();
-    }
   }
 }
 
@@ -5491,7 +5443,7 @@ async function switchAgent(id) {
 // —— 首页列表缓存快照（stale-while-revalidate，纯客户端）——
 // 打开页面/切电脑/切 agent 时先渲染上次的列表快照（零网络往返），后台 loadHome 全量刷新覆盖。
 // 只存首屏所需：projects + attention + 散聊天页（headSessions）；项目内会话不存——默认全折叠
-// 首屏用不上，且体积大，由后台预取补齐。running/approvals 等易变徽标按快照值先显示，
+// 首屏用不上，且体积大，由项目展开后的分页请求补齐。running/approvals 等易变徽标按快照值先显示，
 // 刷新与 board.changed 会立即纠正（loadHome 里有对不在 attention 全集者的清标逻辑）。
 const BOARD_SNAP_LIMIT = 300 * 1024; // localStorage 配额有限（其余键还要活），超限宁可不缓存
 function boardSnapKey(daemonId) {
@@ -5546,7 +5498,7 @@ function dropBoardSnapshots(daemonId) {
 }
 // 清空首页列表数据模型。切电脑/切 agent 共用：两者的会话 id 与项目空间都彼此独立
 function resetListModel() {
-  app.listGen++; // 在途的 loadHome/预取/懒加载按代次作废：旧空间数据不污染新模型与快照
+  app.listGen++; // 在途的 loadHome/懒加载按代次作废：旧空间数据不污染新模型与快照
   app.knownById.clear();
   app.projSessions.clear();
   app.projByCwd.clear();
@@ -5555,7 +5507,6 @@ function resetListModel() {
   app.lastSessions = [];
   app.timeline = { sessions: [], cursor: null, done: false, loading: false };
   app.homeMode = null;
-  app.prefetchAt = 0; // 新数据空间：允许立即全量预取，不受上一空间的 20s 节流
   // transcriptCache 不清：键自带 daemonId+agent，跨空间不串；切回来还能断点续传
 }
 
@@ -5585,7 +5536,7 @@ async function loadHome() {
       // attention 是"hub 正在驱动 ∪ 待审批"的权威全集：不在其中的本地会话要清掉
       // running/approvals——否则缓存快照带来的、或断线期间错过 board.changed 的徽标
       // 会永不熄灭。active 不清：桌面 GUI 驱动的会话仅文件活跃、不在 attention 里，
-      // 清了会把"进行中"区打灭；其时效由数据刷新（head 页/预取覆盖写）自然收敛
+      // 清了会把"进行中"区打灭；其时效由数据刷新（head 页/项目分页覆盖写）自然收敛
       const attn = pr?.attention ?? [];
       const freshAttn = new Set(attn.map((s) => s.id));
       for (const s of app.knownById.values()) {
@@ -5598,9 +5549,6 @@ async function loadHome() {
       ingestSessions(app.headSessions);
       saveBoardSnapshotSoon();
       if (app.view === "list") renderList();
-      // 首页渲染后台全量预取所有项目会话（不阻塞、不 await）：展开即秒开。
-      // 涵盖了「刷新时重载已展开项目」——预取会把每个项目都拉全，包括开着的那些。
-      prefetchAllProjects();
       return;
     } catch (e) {
       if (!isUnknownMethodErr(e)) return; // 非"方法不存在"（超时/断网等）：保留旧渲染，下次再试
